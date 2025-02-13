@@ -1,0 +1,19 @@
+[package]
+name = "ham-tools"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+calamine = { version = "0.26.1", features = ["dates"] }
+anyhow = "1.0.95"
+clap = { version = "4.5.27", features = ["derive"] }
+chrono = "0.4.39"
+hambands = "1.0.0"
+regex = "1.11.1"
+lazy-regex = "3.4.1"
+yeet-ops = "1.0.0"
+rust_decimal = "1.36.0"
+
+[[bin]]
+path = "src/qso_sheet_to_adi.rs"
+name = "qso-sheet-to-adi"
