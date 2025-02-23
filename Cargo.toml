@@ -1,5 +1,5 @@
 [package]
-name = "ham-tools"
+name = "radio-and-ham-tools"
 version = "0.1.0"
 edition = "2021"
 
@@ -13,7 +13,14 @@ regex = "1.11.1"
 lazy-regex = "3.4.1"
 yeet-ops = "1.0.0"
 rust_decimal = "1.36.0"
+hound = "3.5.1"
+byteorder = "1.5.0"
+num-complex = "0.4.6"
 
 [[bin]]
 path = "src/qso_sheet_to_adi.rs"
 name = "qso-sheet-to-adi"
+
+[[bin]]
+path = "src/sdrpp_iq_demod_ssb.rs"
+name = "sdrpp-iq-demod-ssb"

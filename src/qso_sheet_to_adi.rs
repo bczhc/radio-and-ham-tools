@@ -1,5 +1,8 @@
 #![feature(decl_macro)]
 #![feature(yeet_expr)]
+#![feature(let_chains)]
+
+mod sdrpp_iq_demod_ssb;
 
 use anyhow::anyhow;
 use calamine::{open_workbook, Data, DataType, Ods, Range, Reader};
@@ -37,7 +40,7 @@ fn main() -> anyhow::Result<()> {
 
     let mut doc: Ods<_> = open_workbook(&args.input)?;
     let worksheets = doc.worksheets();
-    for (_, sheet) in worksheets {
+    for (_, sheet) in worksheets.iter().skip(1) {
         process_sheet(&sheet, &args, &mut adif)?;
         println!();
     }

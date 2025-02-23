@@ -388,21 +388,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ham-tools"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "calamine",
- "chrono",
- "clap",
- "hambands",
- "lazy-regex",
- "regex",
- "rust_decimal",
- "yeet-ops",
-]
-
-[[package]]
 name = "hambands"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -428,6 +413,12 @@ name = "heck"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
+
+[[package]]
+name = "hound"
+version = "3.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "62adaabb884c94955b19907d60019f4e145d091c75345379e70d1ee696f7854f"
 
 [[package]]
 name = "iana-time-zone"
@@ -541,6 +532,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "num-complex"
+version = "0.4.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73f88a1307638156682bada9d7604135552957b7818057dcef22705b4d509495"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
 name = "num-traits"
 version = "0.2.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -619,6 +619,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0e4dccaaaf89514f546c693ddc140f729f958c247918a13380cccc6078391acc"
 dependencies = [
  "proc-macro2",
+]
+
+[[package]]
+name = "radio-and-ham-tools"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "byteorder",
+ "calamine",
+ "chrono",
+ "clap",
+ "hambands",
+ "hound",
+ "lazy-regex",
+ "num-complex",
+ "regex",
+ "rust_decimal",
+ "yeet-ops",
 ]
 
 [[package]]
