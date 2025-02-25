@@ -1,6 +1,9 @@
 use byteorder::{ReadBytesExt, WriteBytesExt, LE};
 use clap::{Parser, ValueEnum};
-use num_complex::Complex64;
+use dasp::Sample;
+use hound::{SampleFormat, WavSpec};
+use num_complex::{Complex, Complex64};
+use rustfft::FftPlanner;
 use std::f64::consts::PI;
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read};
@@ -27,10 +30,13 @@ struct Args {
     input: PathBuf,
     /// Wav output
     output: PathBuf,
-    #[arg(short = 'a', default_value = "60.0")]
+    #[arg(short = 'a', default_value = "1.0")]
     amplification: f64,
     #[arg(long = "swap-iq")]
     swap_iq: bool,
+    /// Time in seconds. Default to the whole IQ file.
+    #[arg(long = "time")]
+    time: Option<f64>,
 }
 
 #[derive(ValueEnum, Debug, PartialEq, Eq, Clone)]
@@ -39,7 +45,44 @@ enum SsbType {
     Lsb,
 }
 
-/// FIXME: This is a wrong implementation.
+pub fn complex_hilbert(input: &[Complex64]) -> Vec<Complex<f64>> {
+    let len = input.len();
+    let mut planner = FftPlanner::<f64>::new();
+    let fft = planner.plan_fft_forward(len);
+
+    let mut fft_complex = input.iter().copied().collect::<Vec<_>>();
+    fft.process(&mut fft_complex);
+
+    let mut h_spectrum = vec![Complex::new(0.0, 0.0); len];
+
+    if len % 2 == 0 {
+        h_spectrum[0] = Complex::new(1.0, 0.0);
+        h_spectrum[len / 2] = Complex::new(1.0, 0.0);
+        for i in 1..(len / 2) {
+            h_spectrum[i] = Complex::new(2.0, 0.0);
+        }
+    } else {
+        h_spectrum[0] = Complex::new(1.0, 0.0);
+        for i in 1..((len + 1) / 2) {
+            h_spectrum[i] = Complex::new(2.0, 0.0);
+        }
+    }
+
+    for i in 0..len {
+        fft_complex[i] = fft_complex[i] * h_spectrum[i];
+    }
+
+    let mut ifft_complex = fft_complex.clone();
+    let ifft = planner.plan_fft_inverse(len);
+    ifft.process(&mut ifft_complex);
+
+    for val in ifft_complex.iter_mut() {
+        *val = *val / len as f64
+    }
+
+    ifft_complex
+}
+
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
@@ -53,42 +96,54 @@ fn main() -> anyhow::Result<()> {
         swap_iq = !swap_iq;
     }
 
-    let mut command = Command::new("ffmpeg")
-        .args([
-            "-f",
-            "f32le",
-            "-ac",
-            "1",
-            "-ar",
-            "768000",
-            "-i",
-            "pipe:0",
-            "-ar",
-            format!("{}", args.output_sample_rate).as_str(),
-            args.output.to_str().unwrap(),
-            "-y",
-        ])
+    let program =
+        shell_words::split("ffmpeg -ar 768000 -ac 2 -f f64le -i pipe:0 -ac 2 -ar 6000 -f f64le -")?;
+    let mut command = Command::new(&program[0])
+        .args(&program[1..])
         .stderr(Stdio::inherit())
-        .stdout(Stdio::inherit())
         .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
         .spawn()?;
-    let ffmpeg_stdin = command.stdin.take().unwrap();
-    let mut ffmpeg_writer = BufWriter::new(ffmpeg_stdin);
 
-    let iq = read_iq(args.input, swap_iq)?;
-    for (n, c) in iq {
-        let t = n as f64 / SAMPLE_RATE as f64;
-        // multiply by e^j2πft to shift the spectrum
-        let shifted_iq = Complex64::from_polar(1.0, 2.0 * PI * t * f_shift as f64) * c;
-        let new_sample = shifted_iq.re * amplification;
-        // sample format: PCM f32le
-        ffmpeg_writer.write_f32::<LE>(new_sample as f32)?;
-    }
+    let mut program_in = BufWriter::new(command.stdin.take().unwrap());
+    spawn(move || {
+        let iq = read_iq(
+            args.input,
+            swap_iq,
+            args.time.map(|x| (x * 768000_f64) as u64),
+        )
+        .unwrap();
+        for (n, c) in iq {
+            let t = n as f64 / SAMPLE_RATE as f64;
+            // multiply by e^j2πft to shift the spectrum
+            let shifted_iq = Complex64::from_polar(1.0, 2.0 * PI * t * f_shift as f64) * c;
+            // after the shift, resample the iq to a lower sample rate to reduce the hilbert transform work
+            program_in.write_f64::<LE>(shifted_iq.re).unwrap();
+            program_in.write_f64::<LE>(shifted_iq.im).unwrap();
+        }
+    });
 
-    drop(ffmpeg_writer);
+    let program_out = BufReader::new(command.stdout.take().unwrap());
+    let new_samples = collect_f64le_iq_from_reader(program_out)?;
     let status = command.wait()?;
     if !status.success() {
         panic!("ffmpeg exits with non-zero status: {}", status);
+    }
+
+    let new_samples_hilbert = complex_hilbert(&new_samples);
+    let mut out = hound::WavWriter::new(
+        BufWriter::new(File::create(args.output)?),
+        WavSpec {
+            channels: 1,
+            sample_rate: 6000,
+            bits_per_sample: 32,
+            sample_format: SampleFormat::Float,
+        },
+    )?;
+
+    for s in new_samples_hilbert {
+        let s = (s.re * amplification).to_sample::<f32>();
+        out.write_sample(s)?
     }
 
     Ok(())
@@ -97,6 +152,7 @@ fn main() -> anyhow::Result<()> {
 fn read_iq(
     wav_file: impl AsRef<Path> + Send + 'static,
     swap_iq: bool,
+    samples_limit: Option<u64>,
 ) -> anyhow::Result<Receiver<(u64, Complex64)>> {
     let (tx, rx) = sync_channel(CHANNEL_SIZE);
     spawn(move || {
@@ -121,8 +177,11 @@ fn read_iq(
                     if swap_iq {
                         mem::swap(&mut i, &mut q);
                     }
-                    let i_f64 = sample_s16_to_f64(i);
-                    let q_f64 = sample_s16_to_f64(q);
+                    let i_f64 = i.to_sample::<f64>();
+                    let q_f64 = q.to_sample::<f64>();
+                    if sample_n > samples_limit.unwrap_or(u64::MAX) {
+                        break;
+                    }
                     tx.send((sample_n, Complex64::new(i_f64, q_f64))).unwrap();
                     sample_n += 1;
                 }
@@ -133,7 +192,19 @@ fn read_iq(
     Ok(rx)
 }
 
-#[inline]
-fn sample_s16_to_f64(x: i16) -> f64 {
-    x as f64 / i16::MAX as f64
+fn collect_f64le_iq_from_reader<R: Read>(mut reader: R) -> anyhow::Result<Vec<Complex64>> {
+    let mut collected = Vec::new();
+    loop {
+        let s1 = reader.read_f64::<LE>();
+        let s2 = reader.read_f64::<LE>();
+        match (s1, s2) {
+            (Err(e), _) if e.kind() == io::ErrorKind::UnexpectedEof => break,
+            (_, Err(e)) if e.kind() == io::ErrorKind::UnexpectedEof => break,
+            (Ok(i), Ok(q)) => {
+                collected.push(Complex64::new(i, q));
+            }
+            _ => unreachable!(),
+        }
+    }
+    Ok(collected)
 }

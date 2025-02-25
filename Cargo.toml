@@ -20,6 +20,8 @@ bczhc_lib = { path = "/home/bczhc/code/rust/lib/" }
 hilbert_transform = "0.1.1"
 lowpass-filter = "0.3.2"
 shell-words = "1.1.0"
+rustfft = "6.2.0"
+dasp = "0.11.0"
 
 [[bin]]
 path = "src/qso_sheet_to_adi.rs"

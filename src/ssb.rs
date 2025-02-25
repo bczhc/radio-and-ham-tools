@@ -7,7 +7,7 @@ use std::fs::File;
 use std::io::BufWriter;
 
 fn main() -> anyhow::Result<()> {
-    let iq_sample_rate = 48000;
+    let iq_sample_rate = 768000;
     let iq_output = "/home/bczhc/iq.wav";
 
     let mut iq_writer = hound::WavWriter::new(
@@ -15,23 +15,13 @@ fn main() -> anyhow::Result<()> {
         WavSpec {
             channels: 2,
             sample_rate: iq_sample_rate,
-            bits_per_sample: 32,
-            sample_format: SampleFormat::Float,
+            bits_per_sample: 16,
+            sample_format: SampleFormat::Int,
         },
     )?;
 
-    let mut wav_output = hound::WavWriter::new(
-        File::create("/home/bczhc/out.wav")?,
-        WavSpec {
-            channels: 1,
-            sample_rate: 48000,
-            bits_per_sample: 32,
-            sample_format: SampleFormat::Float,
-        },
-    )?;
-
-    let samples1 = read_audio_samples("/home/bczhc/3_bp2k.wav")?;
-    let samples2 = read_audio_samples("/home/bczhc/4_bp2k.wav")?;
+    let samples1 = read_audio_samples("/home/bczhc/1.wav")?;
+    let samples2 = read_audio_samples("/home/bczhc/2.wav")?;
     let hilbert1 = hilbert_transform::hilbert(&samples1);
     let hilbert2 = hilbert_transform::hilbert(&samples2);
     let longer;
@@ -43,15 +33,15 @@ fn main() -> anyhow::Result<()> {
         longer = hilbert2;
         shorter = hilbert1;
     }
-    let f_shift = 2000.0;
+    let f_shift = 0.0;
     for (i, _) in shorter.iter().enumerate() {
         let t = i as f64 / iq_sample_rate as f64;
         let a = Complex64::from_polar(1.0, 2.0 * PI * f_shift * t);
         let iq = longer[i] * 0.5 + swap_iq(shorter[i]) * 0.5;
         let iq = iq * a;
-        iq_writer.write_iq_f32(iq)?;
-        let pcm = iq.re;
-        wav_output.write_sample(pcm as f32)?;
+        iq_writer.write_iq_s16(iq)?;
+        // let pcm = iq.re;
+        // wav_output.write_sample(pcm as f32)?;
     }
 
     /*// let hilbert_window_samples = 5000;
