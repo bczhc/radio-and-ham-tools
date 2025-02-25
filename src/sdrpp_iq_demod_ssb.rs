@@ -8,7 +8,6 @@ use dasp::Sample;
 use hound::{SampleFormat, WavSpec, WavWriter};
 use lazy_regex::regex;
 use num_complex::{Complex, Complex64};
-use radio_and_ham_tools::SYNC_CHANNEL_SIZE;
 use rayon::prelude::*;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
@@ -19,9 +18,9 @@ use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::str::FromStr;
-use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::thread::spawn;
 use std::{io, mem};
+use crossbeam_channel::{bounded, Receiver, Sender};
 use yeet_ops::yeet;
 
 const SAMPLE_RATE: u64 = 768000_u64;
@@ -146,14 +145,24 @@ fn main() -> anyhow::Result<()> {
     }
 
     println!("Shifting spectrum and downsampling...");
-    spawn(move || {
-        let iq = read_iq_raw(args.input, swap_iq, skip_samples, duration_samples).unwrap();
-        for (_, c) in iq {
-            for x in &mut feed_vec {
-                x.send(c).unwrap();
+    // spawn(move || {
+    //     let mut feed_vec = feed_vec;
+    //     let iq = read_iq_raw(args.input, swap_iq, skip_samples, duration_samples).unwrap();
+    //     for (_, c) in iq {
+    //         for x in &mut feed_vec {
+    //             x.send(c).unwrap();
+    //         }
+    //     }
+    // });
+    for sender in feed_vec {
+        let input = args.input.clone();
+        spawn(move || {
+            let iq = read_iq_raw(input, swap_iq, skip_samples, duration_samples).unwrap();
+            for (_, c) in iq {
+                sender.send(c).unwrap();
             }
-        }
-    });
+        });
+    }
 
     let mut result_vec = Vec::new();
     for x in task_vec {
@@ -198,7 +207,7 @@ fn read_iq_raw(
     samples_skip: u64,
     samples_duration: Option<u64>,
 ) -> anyhow::Result<Receiver<(u64, Complex64)>> {
-    let (tx, rx) = sync_channel(CHANNEL_SIZE);
+    let (tx, rx) = bounded(CHANNEL_SIZE);
     spawn(move || {
         // Wav produced by SDR++ sometimes has a wrong header indicating a truncated length.
         // Read the wav on our own.
@@ -273,11 +282,11 @@ fn spawn_shift_and_downsample_thread(
     f_center: i64,
     freq: i64,
     ssb_type: SsbType,
-) -> anyhow::Result<(SyncSender<Complex64>, Receiver<Vec<Complex64>>)> {
+) -> anyhow::Result<(Sender<Complex64>, Receiver<Vec<Complex64>>)> {
     let f_shift = f_center - freq;
 
-    let (tx, rx) = sync_channel(SYNC_CHANNEL_SIZE);
-    let (result_tx, result_rx) = sync_channel(1);
+    let (tx, rx) = bounded(CHANNEL_SIZE);
+    let (result_tx, result_rx) = bounded(1);
 
     let program = shell_words::split(
         format!("ffmpeg -ar {SAMPLE_RATE} -ac 2 -f f64le -i pipe:0 -ac 2 -ar 6000 -f f64le -")

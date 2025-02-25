@@ -23,6 +23,7 @@ shell-words = "1.1.0"
 rustfft = "6.2.0"
 dasp = "0.11.0"
 rayon = "1.10.0"
+crossbeam-channel = "0.5.14"
 
 [[bin]]
 path = "src/qso_sheet_to_adi.rs"
