@@ -27,7 +27,7 @@ struct Args {
     ssb_type: SsbType,
     #[arg(short = 'r', default_value = "6000")]
     output_sample_rate: u32,
-    /// IQ wav input
+    /// IQ raw input
     input: PathBuf,
     /// Wav output
     output: PathBuf,
@@ -124,7 +124,7 @@ fn main() -> anyhow::Result<()> {
 
     let mut program_in = BufWriter::new(command.stdin.take().unwrap());
     spawn(move || {
-        let iq = read_iq(args.input, swap_iq, skip_samples, duration_samples).unwrap();
+        let iq = read_iq_raw(args.input, swap_iq, skip_samples, duration_samples).unwrap();
         for (n, c) in iq {
             let t = n as f64 / SAMPLE_RATE as f64;
             // multiply by e^j2πft to shift the spectrum
@@ -161,7 +161,7 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn read_iq(
+fn read_iq_raw(
     wav_file: impl AsRef<Path> + Send + 'static,
     swap_iq: bool,
     samples_skip: u64,
@@ -171,11 +171,10 @@ fn read_iq(
     spawn(move || {
         // Wav produced by SDR++ sometimes has a wrong header indicating a truncated length.
         // Read the wav on our own.
-        const SDRPP_WAV_HEADER_SIZE: u64 = 44;
         let mut reader = BufReader::with_capacity(1048576, File::open(wav_file).unwrap());
         reader
             .seek(SeekFrom::Start(
-                SDRPP_WAV_HEADER_SIZE + samples_skip * 2, /* channel is stereo */
+                samples_skip * 2 /* s16 size */ * 2, /* channel is stereo */
             ))
             .unwrap();
         let mut iq_sample_n = 0_u64;
@@ -194,7 +193,8 @@ fn read_iq(
                     if iq_sample_n > samples_duration.unwrap_or(u64::MAX) {
                         break;
                     }
-                    tx.send((iq_sample_n, Complex64::new(i_f64, q_f64))).unwrap();
+                    tx.send((iq_sample_n, Complex64::new(i_f64, q_f64)))
+                        .unwrap();
                     iq_sample_n += 1;
                 }
                 _ => unreachable!(),
