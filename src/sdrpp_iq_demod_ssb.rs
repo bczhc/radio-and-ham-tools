@@ -219,8 +219,8 @@ fn read_iq_raw(
             .unwrap();
         let mut iq_sample_n = 0_u64;
         loop {
-            let s1 = reader.read_i16::<LE>();
-            let s2 = reader.read_i16::<LE>();
+            let s1 = reader.read_f32::<LE>();
+            let s2 = reader.read_f32::<LE>();
             match (s1, s2) {
                 (Err(e), _) if e.kind() == io::ErrorKind::UnexpectedEof => break,
                 (_, Err(e)) if e.kind() == io::ErrorKind::UnexpectedEof => break,
@@ -228,12 +228,10 @@ fn read_iq_raw(
                     if swap_iq {
                         mem::swap(&mut i, &mut q);
                     }
-                    let i_f64 = i.to_sample::<f64>();
-                    let q_f64 = q.to_sample::<f64>();
                     if iq_sample_n > samples_duration.unwrap_or(u64::MAX) {
                         break;
                     }
-                    tx.send((iq_sample_n, Complex64::new(i_f64, q_f64)))
+                    tx.send((iq_sample_n, Complex64::new(i as f64, q as f64)))
                         .unwrap();
                     iq_sample_n += 1;
                 }
