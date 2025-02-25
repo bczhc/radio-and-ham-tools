@@ -16,6 +16,10 @@ rust_decimal = "1.36.0"
 hound = "3.5.1"
 byteorder = "1.5.0"
 num-complex = "0.4.6"
+bczhc_lib = { path = "/home/bczhc/code/rust/lib/" }
+hilbert_transform = "0.1.1"
+lowpass-filter = "0.3.2"
+shell-words = "1.1.0"
 
 [[bin]]
 path = "src/qso_sheet_to_adi.rs"
@@ -24,3 +28,11 @@ name = "qso-sheet-to-adi"
 [[bin]]
 path = "src/sdrpp_iq_demod_ssb.rs"
 name = "sdrpp-iq-demod-ssb"
+
+[[bin]]
+path = "src/ssb.rs"
+name = "ssb"
+
+[[bin]]
+path = "src/two_audio_to_iq_mod.rs"
+name = "two-audio-to-iq-mod"
