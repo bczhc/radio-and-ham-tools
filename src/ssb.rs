@@ -49,7 +49,7 @@ fn main() -> anyhow::Result<()> {
         let a = Complex64::from_polar(1.0, 2.0 * PI * f_shift * t);
         let iq = longer[i] * 0.5 + swap_iq(shorter[i]) * 0.5;
         let iq = iq * a;
-        iq_writer.write_iq(iq)?;
+        iq_writer.write_iq_f32(iq)?;
         let pcm = iq.re;
         wav_output.write_sample(pcm as f32)?;
     }
