@@ -1,4 +1,5 @@
 use byteorder::{ReadBytesExt, WriteBytesExt, LE};
+use chrono::NaiveTime;
 use clap::{Parser, ValueEnum};
 use dasp::Sample;
 use hound::{SampleFormat, WavSpec};
@@ -6,7 +7,7 @@ use num_complex::{Complex, Complex64};
 use rustfft::FftPlanner;
 use std::f64::consts::PI;
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Read};
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{sync_channel, Receiver};
@@ -34,9 +35,12 @@ struct Args {
     amplification: f64,
     #[arg(long = "swap-iq")]
     swap_iq: bool,
-    /// Time in seconds. Default to the whole IQ file.
-    #[arg(long = "time")]
-    time: Option<f64>,
+    /// Start time. Format: HH:mm:ss
+    #[arg(long = "start", default_value = "00:00:00")]
+    start: String,
+    #[arg(long = "end")]
+    /// End time. Format: HH:mm:ss
+    end: Option<String>,
 }
 
 #[derive(ValueEnum, Debug, PartialEq, Eq, Clone)]
@@ -96,8 +100,21 @@ fn main() -> anyhow::Result<()> {
         swap_iq = !swap_iq;
     }
 
-    let program =
-        shell_words::split("ffmpeg -ar 768000 -ac 2 -f f64le -i pipe:0 -ac 2 -ar 6000 -f f64le -")?;
+    let zero_time = NaiveTime::from_hms_opt(0, 0, 0).unwrap();
+    let start = NaiveTime::parse_from_str(&args.start, "%H:%M:%S")?;
+    let skip_samples = (start - zero_time).num_seconds() as u64 * SAMPLE_RATE;
+    let duration_samples = args
+        .end
+        .map(|x| {
+            NaiveTime::parse_from_str(&x, "%H:%M:%S")
+                .map(|x| (x - start).num_seconds() as u64 * SAMPLE_RATE)
+        })
+        .transpose()?;
+
+    let program = shell_words::split(
+        format!("ffmpeg -ar {SAMPLE_RATE} -ac 2 -f f64le -i pipe:0 -ac 2 -ar 6000 -f f64le -")
+            .as_str(),
+    )?;
     let mut command = Command::new(&program[0])
         .args(&program[1..])
         .stderr(Stdio::inherit())
@@ -107,12 +124,7 @@ fn main() -> anyhow::Result<()> {
 
     let mut program_in = BufWriter::new(command.stdin.take().unwrap());
     spawn(move || {
-        let iq = read_iq(
-            args.input,
-            swap_iq,
-            args.time.map(|x| (x * 768000_f64) as u64),
-        )
-        .unwrap();
+        let iq = read_iq(args.input, swap_iq, skip_samples, duration_samples).unwrap();
         for (n, c) in iq {
             let t = n as f64 / SAMPLE_RATE as f64;
             // multiply by e^j2πft to shift the spectrum
@@ -152,21 +164,21 @@ fn main() -> anyhow::Result<()> {
 fn read_iq(
     wav_file: impl AsRef<Path> + Send + 'static,
     swap_iq: bool,
-    samples_limit: Option<u64>,
+    samples_skip: u64,
+    samples_duration: Option<u64>,
 ) -> anyhow::Result<Receiver<(u64, Complex64)>> {
     let (tx, rx) = sync_channel(CHANNEL_SIZE);
     spawn(move || {
         // Wav produced by SDR++ sometimes has a wrong header indicating a truncated length.
         // Read the wav on our own.
-        const SDRPP_WAV_HEADER_SIZE: usize = 44;
+        const SDRPP_WAV_HEADER_SIZE: u64 = 44;
         let mut reader = BufReader::with_capacity(1048576, File::open(wav_file).unwrap());
-        // skip the header
-        io::copy(
-            &mut reader.by_ref().take(SDRPP_WAV_HEADER_SIZE as u64),
-            &mut io::sink(),
-        )
-        .unwrap();
-        let mut sample_n = 0_u64;
+        reader
+            .seek(SeekFrom::Start(
+                SDRPP_WAV_HEADER_SIZE + samples_skip * 2, /* channel is stereo */
+            ))
+            .unwrap();
+        let mut iq_sample_n = 0_u64;
         loop {
             let s1 = reader.read_i16::<LE>();
             let s2 = reader.read_i16::<LE>();
@@ -179,11 +191,11 @@ fn read_iq(
                     }
                     let i_f64 = i.to_sample::<f64>();
                     let q_f64 = q.to_sample::<f64>();
-                    if sample_n > samples_limit.unwrap_or(u64::MAX) {
+                    if iq_sample_n > samples_duration.unwrap_or(u64::MAX) {
                         break;
                     }
-                    tx.send((sample_n, Complex64::new(i_f64, q_f64))).unwrap();
-                    sample_n += 1;
+                    tx.send((iq_sample_n, Complex64::new(i_f64, q_f64))).unwrap();
+                    iq_sample_n += 1;
                 }
                 _ => unreachable!(),
             }

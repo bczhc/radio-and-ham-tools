@@ -924,6 +924,7 @@ dependencies = [
  "lazy-regex",
  "lowpass-filter",
  "num-complex",
+ "rayon",
  "regex",
  "rust_decimal",
  "rustfft",
