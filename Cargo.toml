@@ -40,3 +40,7 @@ name = "ssb"
 [[bin]]
 path = "src/two_audio_to_iq_mod.rs"
 name = "two-audio-to-iq-mod"
+
+[[bin]]
+path = "src/iq_raw_to_wav.rs"
+name = "iq-raw-to-wav"

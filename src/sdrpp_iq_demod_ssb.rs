@@ -214,7 +214,7 @@ fn read_iq_raw(
         let mut reader = BufReader::with_capacity(1048576, File::open(wav_file).unwrap());
         reader
             .seek(SeekFrom::Start(
-                samples_skip * 2 /* s16 size */ * 2, /* channel is stereo */
+                samples_skip * size_of::<f32>() as u64 * 2 /* stereo channel */,
             ))
             .unwrap();
         let mut iq_sample_n = 0_u64;
