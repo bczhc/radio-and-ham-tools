@@ -20,11 +20,12 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::str::FromStr;
 use std::thread::spawn;
-use std::{io, mem};
+use std::{io, mem, thread};
 use yeet_ops::yeet;
 
-const SAMPLE_RATE: u64 = 768000_u64;
-const CHANNEL_SIZE: usize = SAMPLE_RATE as usize * 10;
+const IQ_SAMPLE_RATE: u64 = 768000_u64;
+const VOICE_SAMPLE_RATE: u64 = 6000_u64;
+const CHANNEL_SIZE: usize = IQ_SAMPLE_RATE as usize * 10;
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -33,8 +34,6 @@ struct Args {
     /// Demodulation frequencies separated by comma. Format: <kHz>(LSB|USB); e.g.: 7056USB, 13200.2LSB
     #[arg(short = 'f')]
     f_target_list: String,
-    #[arg(short = 'r', default_value = "6000")]
-    output_sample_rate: u32,
     /// IQ raw input
     input: PathBuf,
     /// Wav output directory
@@ -125,88 +124,51 @@ fn main() -> anyhow::Result<()> {
     let f_center: i64 = args.f_center;
     let swap_iq = args.swap_iq;
 
-    let sample_range = parse_sample_range(Some(&args.start), args.end.as_ref().map(|x| x.as_ref()), SAMPLE_RATE)?;
+    let sample_range = parse_sample_range(
+        Some(&args.start),
+        args.end.as_ref().map(|x| x.as_ref()),
+        IQ_SAMPLE_RATE,
+    )?;
 
-    let mut task_vec = Vec::new();
-    let mut feed_vec = Vec::new();
+    let mut threads = Vec::new();
     for f in freq_list {
-        let (tx, rx) = spawn_shift_and_downsample_thread(f_center, f.0, f.1)?;
-        task_vec.push((f, rx));
-        feed_vec.push(tx);
-    }
-
-    println!("Shifting spectrum and downsampling...");
-    // spawn(move || {
-    //     let mut feed_vec = feed_vec;
-    //     let iq = read_iq_raw(args.input, swap_iq, skip_samples, duration_samples).unwrap();
-    //     for (_, c) in iq {
-    //         for x in &mut feed_vec {
-    //             x.send(c).unwrap();
-    //         }
-    //     }
-    // });
-    for sender in feed_vec {
-        let input = args.input.clone();
-        spawn(move || {
-            let iq = read_iq_raw(input, swap_iq, sample_range.start, sample_range.length).unwrap();
-            for (_, c) in iq {
-                sender.send(c).unwrap();
-            }
-        });
-    }
-
-    let mut result_vec = Vec::new();
-    for x in task_vec {
-        // wait for the result
-        let result = x.1.recv().unwrap();
-        result_vec.push((x.0, result));
-    }
-    result_vec.sort_by(|a, b| a.0 .0.cmp(&b.0 .0));
-    println!("Performing Hilbert transform...");
-
-    let result_vec = result_vec
-        .par_iter()
-        .map(|x| (x.0, complex_hilbert(&x.1)))
-        .collect::<Vec<_>>();
-
-    println!("Writing to wav files...");
-    for (freq, samples) in result_vec {
-        let filename = output_filename(freq.0, freq.1);
+        let filename = output_filename(f.0, f.1);
         let path = args.out_dir.join(filename);
-        println!("Write to {}", path.display());
-        let mut writer = WavWriter::new(
-            BufWriter::new(File::create(path)?),
+        let mut wav_writer = WavWriter::new(
+            BufWriter::new(File::create(&path)?),
             WavSpec {
                 channels: 1,
-                sample_rate: 6000,
+                sample_rate: VOICE_SAMPLE_RATE as u32,
                 bits_per_sample: 16,
                 sample_format: SampleFormat::Int,
             },
         )?;
-        for new_iq in samples {
-            let pcm_sample = (new_iq.re * args.amplification).to_sample::<i16>();
-            writer.write_sample(pcm_sample)?;
-        }
-    }
 
-    Ok(())
-}
-
-fn collect_f64le_iq_from_reader<R: Read>(mut reader: R) -> anyhow::Result<Vec<Complex64>> {
-    let mut collected = Vec::new();
-    loop {
-        let s1 = reader.read_f64::<LE>();
-        let s2 = reader.read_f64::<LE>();
-        match (s1, s2) {
-            (Err(e), _) if e.kind() == io::ErrorKind::UnexpectedEof => break,
-            (_, Err(e)) if e.kind() == io::ErrorKind::UnexpectedEof => break,
-            (Ok(i), Ok(q)) => {
-                collected.push(Complex64::new(i, q));
+        let worker = spawn_demodulation_worker(f_center, f.0, f.1)?;
+        // feed thread
+        let input = args.input.clone();
+        spawn(move || {
+            let iq = read_iq_raw(input, swap_iq, sample_range.start, sample_range.length).unwrap();
+            for (_, iq) in iq {
+                worker.0.send(iq).unwrap();
             }
-            _ => unreachable!(),
-        }
+        });
+        // receiving thread
+        let t = thread::Builder::new()
+            .name(format!("Worker: {:?}", f))
+            .spawn(move || {
+                for pcm_sample in worker.1 {
+                    wav_writer
+                        .write_sample((pcm_sample * args.amplification).to_sample::<i16>())
+                        .unwrap();
+                }
+                println!("Output to {} finished", path.display());
+            })?;
+        threads.push(t);
     }
-    Ok(collected)
+
+    threads.into_iter().for_each(|x| x.join().unwrap());
+    Ok(())
 }
 
 fn parse_arg_frequencies(input: &str) -> anyhow::Result<Vec<(i64, SsbType)>> {
@@ -226,18 +188,19 @@ fn parse_arg_frequencies(input: &str) -> anyhow::Result<Vec<(i64, SsbType)>> {
     Ok(freq_list)
 }
 
-fn spawn_shift_and_downsample_thread(
+/// - In: Raw IQ samples
+/// - Out: Demodulated PCM samples (mono f64 @ [VOICE_SAMPLE_RATE])
+fn spawn_demodulation_worker(
     f_center: i64,
     freq: i64,
     ssb_type: SsbType,
-) -> anyhow::Result<(Sender<Complex64>, Receiver<Vec<Complex64>>)> {
+) -> anyhow::Result<(Sender<Complex64>, impl IntoIterator<Item = f64>)> {
     let f_shift = f_center - freq;
 
     let (tx, rx) = bounded(CHANNEL_SIZE);
-    let (result_tx, result_rx) = bounded(1);
 
     let program = shell_words::split(
-        format!("ffmpeg -ar {SAMPLE_RATE} -ac 2 -f f64le -i pipe:0 -ac 2 -ar 6000 -f f64le -")
+        format!("ffmpeg -ar {IQ_SAMPLE_RATE} -ac 2 -f f64le -i pipe:0 -ac 2 -ar {VOICE_SAMPLE_RATE} -f f64le -")
             .as_str(),
     )
     .unwrap();
@@ -253,9 +216,10 @@ fn spawn_shift_and_downsample_thread(
 
     spawn(move || {
         for (iq_n, iq) in rx.iter().enumerate() {
-            let t = iq_n as f64 / SAMPLE_RATE as f64;
+            let t = iq_n as f64 / IQ_SAMPLE_RATE as f64;
             // multiply by e^j2πft to shift the spectrum
-            let mut shifted_iq: Complex64 = Complex64::from_polar(1.0, 2.0 * PI * t * f_shift as f64) * iq;
+            let mut shifted_iq: Complex64 =
+                Complex64::from_polar(1.0, 2.0 * PI * t * f_shift as f64) * iq;
             // convert LSB to USB using spectrum mirroring
             if ssb_type == SsbType::Lsb {
                 mem::swap(&mut shifted_iq.re, &mut shifted_iq.im);
@@ -272,9 +236,52 @@ fn spawn_shift_and_downsample_thread(
         }
     });
 
+    let (hilbert_tx, hilbert_rx) = spawn_interval_hilbert_worker()?;
+
     spawn(move || {
-        let collected = collect_f64le_iq_from_reader(program_out).unwrap();
-        result_tx.send(collected).unwrap();
+        let mut reader = program_out;
+        loop {
+            let s1 = reader.read_f64::<LE>();
+            let s2 = reader.read_f64::<LE>();
+            match (s1, s2) {
+                (Err(e), _) if e.kind() == io::ErrorKind::UnexpectedEof => break,
+                (_, Err(e)) if e.kind() == io::ErrorKind::UnexpectedEof => break,
+                (Ok(i), Ok(q)) => {
+                    hilbert_tx.send(Complex64::new(i, q)).unwrap();
+                }
+                _ => unreachable!(),
+            }
+        }
+    });
+
+    let map = hilbert_rx.into_iter().map(|x| x.re);
+    Ok((tx, map))
+}
+
+fn spawn_interval_hilbert_worker() -> anyhow::Result<(Sender<Complex64>, Receiver<Complex64>)> {
+    const GROUP_LENGTH: u64 = 1 * VOICE_SAMPLE_RATE; // 1s as a hilbert group
+    let (tx, rx) = bounded(CHANNEL_SIZE);
+    let (result_tx, result_rx) = bounded(CHANNEL_SIZE);
+
+    spawn(move || {
+        let mut buffer = Vec::new();
+        for iq in rx {
+            buffer.push(iq);
+            if buffer.len() as u64 == GROUP_LENGTH {
+                let transformed = complex_hilbert(&buffer);
+                for sample in transformed {
+                    result_tx.send(sample).unwrap();
+                }
+                buffer.clear();
+            }
+        }
+        // Handle any remaining samples
+        if !buffer.is_empty() {
+            let transformed = complex_hilbert(&buffer);
+            for sample in transformed {
+                result_tx.send(sample).unwrap();
+            }
+        }
     });
 
     Ok((tx, result_rx))
