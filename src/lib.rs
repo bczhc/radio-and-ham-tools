@@ -12,7 +12,7 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc::{sync_channel, Receiver};
 use std::thread::spawn;
 
-pub const SYNC_CHANNEL_SIZE: usize = 1048576;
+pub const SYNC_CHANNEL_SIZE: usize = 10485760;
 
 pub fn read_audio_samples(file: impl AsRef<Path>) -> anyhow::Result<Vec<f64>> {
     let audio_reader = hound::WavReader::new(File::open(file.as_ref())?)?;
@@ -172,4 +172,80 @@ pub fn create_sdrpp_wav_iq(
             sample_format: hound::SampleFormat::Int,
         },
     )?)
+}
+
+pub mod iq_raw {
+    use std::fs::File;
+    use std::{io, mem};
+    use std::io::{BufReader, Seek, SeekFrom};
+    use std::path::Path;
+    use std::thread::spawn;
+    use byteorder::{ReadBytesExt, LE};
+    use chrono::NaiveTime;
+    use crossbeam_channel::{bounded, Receiver};
+    use num_complex::Complex64;
+    use crate::SYNC_CHANNEL_SIZE;
+
+    pub fn parse_sample_range(start: Option<&str>, end: Option<&str>, sample_rate: u64) -> anyhow::Result<SampleRange> {
+        let zero_time = NaiveTime::from_hms_opt(0, 0, 0).unwrap();
+        let start = NaiveTime::parse_from_str(&start.unwrap_or("0:0:0"), "%H:%M:%S")?;
+        let skip_samples = (start - zero_time).num_seconds() as u64 * sample_rate;
+        let duration_samples = end
+            .map(|x| {
+                NaiveTime::parse_from_str(&x, "%H:%M:%S")
+                    .map(|x| (x - start).num_seconds() as u64 * sample_rate)
+            })
+            .transpose()?;
+        Ok(SampleRange {
+            start: skip_samples,
+            length: duration_samples,
+        })
+    }
+    
+    #[derive(Debug, Copy, Clone)]
+    pub struct SampleRange {
+        pub start: u64,
+        pub length: Option<u64>,
+    }
+
+    pub fn read_iq_raw(
+        iq_raw_file: impl AsRef<Path> + Send + 'static,
+        swap_iq: bool,
+        samples_skip: u64,
+        samples_duration: Option<u64>,
+    ) -> anyhow::Result<Receiver<(u64, Complex64)>> {
+        let (tx, rx) = bounded(SYNC_CHANNEL_SIZE);
+        spawn(move || {
+            // Wav produced by SDR++ sometimes has a wrong header indicating a truncated length.
+            // Read the wav on our own.
+            let mut reader = BufReader::with_capacity(1048576, File::open(iq_raw_file).unwrap());
+            reader
+                .seek(SeekFrom::Start(
+                    samples_skip * size_of::<f32>() as u64 * 2 /* stereo channel */,
+                ))
+                .unwrap();
+            let mut iq_sample_n = 0_u64;
+            loop {
+                let s1 = reader.read_f32::<LE>();
+                let s2 = reader.read_f32::<LE>();
+                match (s1, s2) {
+                    (Err(e), _) if e.kind() == io::ErrorKind::UnexpectedEof => break,
+                    (_, Err(e)) if e.kind() == io::ErrorKind::UnexpectedEof => break,
+                    (Ok(mut i), Ok(mut q)) => {
+                        if swap_iq {
+                            mem::swap(&mut i, &mut q);
+                        }
+                        if iq_sample_n > samples_duration.unwrap_or(u64::MAX) {
+                            break;
+                        }
+                        tx.send((iq_sample_n, Complex64::new(i as f64, q as f64)))
+                            .unwrap();
+                        iq_sample_n += 1;
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        });
+        Ok(rx)
+    }
 }

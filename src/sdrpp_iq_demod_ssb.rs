@@ -2,25 +2,25 @@
 
 use anyhow::anyhow;
 use byteorder::{ReadBytesExt, WriteBytesExt, LE};
-use chrono::NaiveTime;
 use clap::{Parser, ValueEnum};
+use crossbeam_channel::{bounded, Receiver, Sender};
 use dasp::Sample;
 use hound::{SampleFormat, WavSpec, WavWriter};
 use lazy_regex::regex;
 use num_complex::{Complex, Complex64};
+use radio_and_ham_tools::iq_raw::{parse_sample_range, read_iq_raw};
 use rayon::prelude::*;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use rustfft::FftPlanner;
 use std::f64::consts::PI;
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom};
-use std::path::{Path, PathBuf};
+use std::io::{BufReader, BufWriter, Read};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::str::FromStr;
 use std::thread::spawn;
 use std::{io, mem};
-use crossbeam_channel::{bounded, Receiver, Sender};
 use yeet_ops::yeet;
 
 const SAMPLE_RATE: u64 = 768000_u64;
@@ -125,16 +125,7 @@ fn main() -> anyhow::Result<()> {
     let f_center: i64 = args.f_center;
     let swap_iq = args.swap_iq;
 
-    let zero_time = NaiveTime::from_hms_opt(0, 0, 0).unwrap();
-    let start = NaiveTime::parse_from_str(&args.start, "%H:%M:%S")?;
-    let skip_samples = (start - zero_time).num_seconds() as u64 * SAMPLE_RATE;
-    let duration_samples = args
-        .end
-        .map(|x| {
-            NaiveTime::parse_from_str(&x, "%H:%M:%S")
-                .map(|x| (x - start).num_seconds() as u64 * SAMPLE_RATE)
-        })
-        .transpose()?;
+    let sample_range = parse_sample_range(Some(&args.start), args.end.as_ref().map(|x| x.as_ref()), SAMPLE_RATE)?;
 
     let mut task_vec = Vec::new();
     let mut feed_vec = Vec::new();
@@ -157,7 +148,7 @@ fn main() -> anyhow::Result<()> {
     for sender in feed_vec {
         let input = args.input.clone();
         spawn(move || {
-            let iq = read_iq_raw(input, swap_iq, skip_samples, duration_samples).unwrap();
+            let iq = read_iq_raw(input, swap_iq, sample_range.start, sample_range.length).unwrap();
             for (_, c) in iq {
                 sender.send(c).unwrap();
             }
@@ -199,47 +190,6 @@ fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
-}
-
-fn read_iq_raw(
-    wav_file: impl AsRef<Path> + Send + 'static,
-    swap_iq: bool,
-    samples_skip: u64,
-    samples_duration: Option<u64>,
-) -> anyhow::Result<Receiver<(u64, Complex64)>> {
-    let (tx, rx) = bounded(CHANNEL_SIZE);
-    spawn(move || {
-        // Wav produced by SDR++ sometimes has a wrong header indicating a truncated length.
-        // Read the wav on our own.
-        let mut reader = BufReader::with_capacity(1048576, File::open(wav_file).unwrap());
-        reader
-            .seek(SeekFrom::Start(
-                samples_skip * size_of::<f32>() as u64 * 2 /* stereo channel */,
-            ))
-            .unwrap();
-        let mut iq_sample_n = 0_u64;
-        loop {
-            let s1 = reader.read_f32::<LE>();
-            let s2 = reader.read_f32::<LE>();
-            match (s1, s2) {
-                (Err(e), _) if e.kind() == io::ErrorKind::UnexpectedEof => break,
-                (_, Err(e)) if e.kind() == io::ErrorKind::UnexpectedEof => break,
-                (Ok(mut i), Ok(mut q)) => {
-                    if swap_iq {
-                        mem::swap(&mut i, &mut q);
-                    }
-                    if iq_sample_n > samples_duration.unwrap_or(u64::MAX) {
-                        break;
-                    }
-                    tx.send((iq_sample_n, Complex64::new(i as f64, q as f64)))
-                        .unwrap();
-                    iq_sample_n += 1;
-                }
-                _ => unreachable!(),
-            }
-        }
-    });
-    Ok(rx)
 }
 
 fn collect_f64le_iq_from_reader<R: Read>(mut reader: R) -> anyhow::Result<Vec<Complex64>> {
