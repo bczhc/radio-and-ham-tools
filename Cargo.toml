@@ -16,7 +16,7 @@ rust_decimal = "1.36.0"
 hound = "3.5.1"
 byteorder = "1.5.0"
 num-complex = "0.4.6"
-bczhc_lib = { path = "/home/bczhc/code/rust/lib/" }
+bczhc_lib = { path = "third_party/bczhc_rust/lib" }
 hilbert_transform = "0.1.1"
 lowpass-filter = "0.3.2"
 shell-words = "1.1.0"

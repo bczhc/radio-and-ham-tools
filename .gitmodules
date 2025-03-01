@@ -1,0 +1,3 @@
+[submodule "third_party/bczhc_rust"]
+	path = third_party/bczhc_rust
+	url = https://github.com/bczhc/rust
