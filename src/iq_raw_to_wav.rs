@@ -1,5 +1,3 @@
-use std::fs::File;
-use std::io::BufWriter;
 use std::path::PathBuf;
 use clap::Parser;
 use hound::{SampleFormat, WavSpec, WavWriter};
@@ -13,7 +11,7 @@ struct Args {
     /// WAV Output
     output: PathBuf,
     /// Start time in format HH:mm:ss
-    #[arg(long)]
+    #[arg(long, default_value = "00:00:00")]
     start: String,
     /// End time in format HH:mm:ss
     #[arg(long)]
@@ -28,7 +26,7 @@ fn main() ->anyhow::Result<()> {
     let sample_range = parse_sample_range(Some(&args.start), args.end.as_ref().map(String::as_str), args.sample_rate)?;
     let iq = read_iq_raw(args.input, false, sample_range.start, sample_range.length)?;
     
-    let mut wav_writer = WavWriter::new(BufWriter::new(File::create(args.output)?), WavSpec {
+    let mut wav_writer = WavWriter::create(args.output, WavSpec {
         channels: 2,
         sample_rate: args.sample_rate as u32,
         bits_per_sample: 16,
@@ -36,7 +34,7 @@ fn main() ->anyhow::Result<()> {
     })?;
 
     for (_n, iq) in iq {
-        wav_writer.write_iq_f32(iq)?
+        wav_writer.write_iq_s16(iq)?
     }
     
     Ok(())
