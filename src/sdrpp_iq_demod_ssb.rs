@@ -21,8 +21,8 @@ use std::io::{BufReader, BufWriter, Read};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::str::FromStr;
-use std::thread::spawn;
-use std::{io, mem, thread};
+use std::{fmt, io, mem, thread};
+use std::fmt::{Display, Formatter};
 use threadpool::ThreadPool;
 use yeet_ops::yeet;
 
@@ -53,7 +53,7 @@ struct Args {
     #[arg(long = "end")]
     /// End time. Format: HH:mm:ss
     end: Option<String>,
-    /// Parallel jobs number
+    /// Parallel jobs number. 0 for unlimited.
     #[arg(short, long, default_value = *NUM_CPUS_STR)]
     jobs: usize,
 }
@@ -155,7 +155,10 @@ fn main() -> anyhow::Result<()> {
         }
     });
     freq_list.dedup();
-    println!("Frequency list: {:#?}", freq_list);
+    println!("Frequency list:");
+    for x in &freq_list {
+        println!("{}", FreqModeDisplay(*x));
+    }
     println!("Jobs: {}", args.jobs);
 
     let f_center: i64 = args.f_center;
@@ -167,7 +170,11 @@ fn main() -> anyhow::Result<()> {
         IQ_SAMPLE_RATE,
     )?;
 
-    let pool = ThreadPool::new(args.jobs);
+    let fixed_pool = if args.jobs == 0 {
+        None
+    } else {
+        Some(ThreadPool::new(args.jobs))
+    };
 
     let mut wav_writer_threads = Vec::new();
     for f in freq_list {
@@ -186,12 +193,20 @@ fn main() -> anyhow::Result<()> {
         let worker = spawn_demodulation_worker(f_center, f.0, f.1)?;
         // feed thread
         let input = args.input.clone();
-        pool.execute(move || {
+        let task = move || {
             let iq = read_iq_raw(input, swap_iq, sample_range.start, sample_range.length).unwrap();
             for (_, iq) in iq {
                 worker.0.send(iq).unwrap();
             }
-        });
+        };
+        match &fixed_pool {
+            None => {
+                thread::spawn(task);
+            }
+            Some(pool) => {
+                pool.execute(task);
+            }
+        }
         // receiving thread
         let t = thread::Builder::new()
             .name(format!("Worker: {:?}", f))
@@ -206,7 +221,6 @@ fn main() -> anyhow::Result<()> {
         wav_writer_threads.push(t);
     }
 
-    pool.join();
     wav_writer_threads
         .into_iter()
         .for_each(|x| x.join().unwrap());
@@ -256,7 +270,7 @@ fn spawn_demodulation_worker(
     let mut program_in = BufWriter::new(command.stdin.take().unwrap());
     let program_out = BufReader::new(command.stdout.take().unwrap());
 
-    spawn(move || {
+    thread::spawn(move || {
         for (iq_n, iq) in rx.iter().enumerate() {
             let t = iq_n as f64 / IQ_SAMPLE_RATE as f64;
             // multiply by e^j2πft to shift the spectrum
@@ -280,7 +294,7 @@ fn spawn_demodulation_worker(
 
     let (hilbert_tx, hilbert_rx) = spawn_interval_hilbert_worker()?;
 
-    spawn(move || {
+    thread::spawn(move || {
         let mut reader = program_out;
         loop {
             let s1 = reader.read_f64::<LE>();
@@ -305,7 +319,7 @@ fn spawn_interval_hilbert_worker() -> anyhow::Result<(Sender<Complex64>, Receive
     let (tx, rx) = bounded(CHANNEL_SIZE);
     let (result_tx, result_rx) = bounded(CHANNEL_SIZE);
 
-    spawn(move || {
+    thread::spawn(move || {
         let mut buffer = Vec::new();
         for iq in rx {
             buffer.push(iq);
@@ -330,6 +344,16 @@ fn spawn_interval_hilbert_worker() -> anyhow::Result<(Sender<Complex64>, Receive
 }
 
 fn output_filename(hz: i64, ssb_type: SsbType) -> String {
-    let khz = Decimal::from(hz) / Decimal::ONE_THOUSAND;
-    format!("{}{}.wav", khz, ssb_type.name())
+    format!("{}.wav", FreqModeDisplay((hz, ssb_type)))
+}
+
+struct FreqModeDisplay((i64, SsbType));
+
+impl Display for FreqModeDisplay {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        use fmt::Write;
+        let hz = self.0.0;
+        let khz = Decimal::from(hz) / Decimal::ONE_THOUSAND;
+        write!(f, "{khz} {}", self.0.1.name())
+    }
 }
