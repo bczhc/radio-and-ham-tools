@@ -58,7 +58,7 @@ struct Args {
     jobs: usize,
 }
 
-#[derive(ValueEnum, Debug, Eq, Clone, Copy)]
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 enum SsbType {
     Usb,
     Lsb,
@@ -73,13 +73,7 @@ impl SsbType {
     }
 }
 
-impl PartialEq<Self> for SsbType {
-    fn eq(&self, other: &Self) -> bool {
-        self == other
-    }
-}
-
-impl PartialOrd<Self> for SsbType {
+impl PartialOrd for SsbType {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         if self == other {
             Some(Ordering::Equal)
