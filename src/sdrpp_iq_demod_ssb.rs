@@ -21,11 +21,17 @@ use std::process::{Command, Stdio};
 use std::str::FromStr;
 use std::thread::spawn;
 use std::{io, mem, thread};
+use once_cell::sync::Lazy;
+use threadpool::ThreadPool;
 use yeet_ops::yeet;
 
 const IQ_SAMPLE_RATE: u64 = 768000_u64;
 const VOICE_SAMPLE_RATE: u64 = 6000_u64;
 const CHANNEL_SIZE: usize = IQ_SAMPLE_RATE as usize * 10;
+
+static NUM_CPUS_STR: Lazy<&'static str> = Lazy::new(|| {
+    num_cpus::get().to_string().leak()
+});
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -48,6 +54,9 @@ struct Args {
     #[arg(long = "end")]
     /// End time. Format: HH:mm:ss
     end: Option<String>,
+    /// Parallel jobs number
+    #[arg(short, long, default_value = *NUM_CPUS_STR)]
+    jobs: usize,
 }
 
 #[derive(ValueEnum, Debug, PartialEq, Eq, Clone, Copy)]
@@ -119,7 +128,8 @@ fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
     let freq_list = parse_arg_frequencies(&args.f_target_list)?;
-    println!("Frequency list: {:?}", freq_list);
+    println!("Frequency list: {:#?}", freq_list);
+    println!("Jobs: {}", args.jobs);
 
     let f_center: i64 = args.f_center;
     let swap_iq = args.swap_iq;
@@ -130,7 +140,9 @@ fn main() -> anyhow::Result<()> {
         IQ_SAMPLE_RATE,
     )?;
 
-    let mut threads = Vec::new();
+    let pool = ThreadPool::new(args.jobs);
+
+    let mut wav_writer_threads = Vec::new();
     for f in freq_list {
         let filename = output_filename(f.0, f.1);
         let path = args.out_dir.join(filename);
@@ -147,7 +159,7 @@ fn main() -> anyhow::Result<()> {
         let worker = spawn_demodulation_worker(f_center, f.0, f.1)?;
         // feed thread
         let input = args.input.clone();
-        spawn(move || {
+        pool.execute(move || {
             let iq = read_iq_raw(input, swap_iq, sample_range.start, sample_range.length).unwrap();
             for (_, iq) in iq {
                 worker.0.send(iq).unwrap();
@@ -164,10 +176,11 @@ fn main() -> anyhow::Result<()> {
                 }
                 println!("Output to {} finished", path.display());
             })?;
-        threads.push(t);
+        wav_writer_threads.push(t);
     }
 
-    threads.into_iter().for_each(|x| x.join().unwrap());
+    pool.join();
+    wav_writer_threads.into_iter().for_each(|x| x.join().unwrap());
     Ok(())
 }
 
@@ -200,7 +213,7 @@ fn spawn_demodulation_worker(
     let (tx, rx) = bounded(CHANNEL_SIZE);
 
     let program = shell_words::split(
-        format!("ffmpeg -ar {IQ_SAMPLE_RATE} -ac 2 -f f64le -i pipe:0 -ac 2 -ar {VOICE_SAMPLE_RATE} -f f64le -")
+        format!("ffmpeg -hide_banner -ar {IQ_SAMPLE_RATE} -ac 2 -f f64le -i pipe:0 -ac 2 -ar {VOICE_SAMPLE_RATE} -f f64le -")
             .as_str(),
     )
     .unwrap();

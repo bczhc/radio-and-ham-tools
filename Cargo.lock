@@ -934,11 +934,14 @@ dependencies = [
  "lazy-regex",
  "lowpass-filter",
  "num-complex",
+ "num_cpus",
+ "once_cell",
  "rayon",
  "regex",
  "rust_decimal",
  "rustfft",
  "shell-words",
+ "threadpool",
  "yeet-ops",
 ]
 
