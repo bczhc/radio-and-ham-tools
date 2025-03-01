@@ -8,11 +8,13 @@ use dasp::Sample;
 use hound::{SampleFormat, WavSpec, WavWriter};
 use lazy_regex::regex;
 use num_complex::{Complex, Complex64};
+use once_cell::sync::Lazy;
 use radio_and_ham_tools::iq_raw::{parse_sample_range, read_iq_raw};
 use rayon::prelude::*;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use rustfft::FftPlanner;
+use std::cmp::Ordering;
 use std::f64::consts::PI;
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read};
@@ -21,7 +23,6 @@ use std::process::{Command, Stdio};
 use std::str::FromStr;
 use std::thread::spawn;
 use std::{io, mem, thread};
-use once_cell::sync::Lazy;
 use threadpool::ThreadPool;
 use yeet_ops::yeet;
 
@@ -29,9 +30,7 @@ const IQ_SAMPLE_RATE: u64 = 768000_u64;
 const VOICE_SAMPLE_RATE: u64 = 6000_u64;
 const CHANNEL_SIZE: usize = IQ_SAMPLE_RATE as usize * 10;
 
-static NUM_CPUS_STR: Lazy<&'static str> = Lazy::new(|| {
-    num_cpus::get().to_string().leak()
-});
+static NUM_CPUS_STR: Lazy<&'static str> = Lazy::new(|| num_cpus::get().to_string().leak());
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -59,7 +58,7 @@ struct Args {
     jobs: usize,
 }
 
-#[derive(ValueEnum, Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(ValueEnum, Debug, Eq, Clone, Copy)]
 enum SsbType {
     Usb,
     Lsb,
@@ -71,6 +70,32 @@ impl SsbType {
             SsbType::Usb => "USB",
             SsbType::Lsb => "LSB",
         }
+    }
+}
+
+impl PartialEq<Self> for SsbType {
+    fn eq(&self, other: &Self) -> bool {
+        self == other
+    }
+}
+
+impl PartialOrd<Self> for SsbType {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        if self == other {
+            Some(Ordering::Equal)
+        } else if *self == Self::Lsb {
+            // LSB < USB
+            Some(Ordering::Less)
+        } else {
+            // USB > LSB
+            Some(Ordering::Greater)
+        }
+    }
+}
+
+impl Ord for SsbType {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.partial_cmp(other).unwrap()
     }
 }
 
@@ -127,7 +152,15 @@ pub fn complex_hilbert(input: &[Complex64]) -> Vec<Complex<f64>> {
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
-    let freq_list = parse_arg_frequencies(&args.f_target_list)?;
+    let mut freq_list = parse_arg_frequencies(&args.f_target_list)?;
+    freq_list.sort_by(|a, b| {
+        if a.0 == b.0 {
+            a.1.cmp(&b.1)
+        } else {
+            a.0.cmp(&b.0)
+        }
+    });
+    freq_list.dedup();
     println!("Frequency list: {:#?}", freq_list);
     println!("Jobs: {}", args.jobs);
 
@@ -180,7 +213,9 @@ fn main() -> anyhow::Result<()> {
     }
 
     pool.join();
-    wav_writer_threads.into_iter().for_each(|x| x.join().unwrap());
+    wav_writer_threads
+        .into_iter()
+        .for_each(|x| x.join().unwrap());
     Ok(())
 }
 
