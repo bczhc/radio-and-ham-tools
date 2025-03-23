@@ -7,22 +7,22 @@ use crossbeam_channel::{bounded, Receiver, Sender};
 use dasp::Sample;
 use hound::{SampleFormat, WavSpec, WavWriter};
 use lazy_regex::regex;
-use num_complex::{Complex, Complex64};
+use num_complex::Complex64;
 use once_cell::sync::Lazy;
 use radio_and_ham_tools::iq_raw::{parse_sample_range, read_iq_raw};
+use radio_and_ham_tools::complex_hilbert_inplace;
 use rayon::prelude::*;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
-use rustfft::FftPlanner;
 use std::cmp::Ordering;
 use std::f64::consts::PI;
+use std::fmt::{Display, Formatter};
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::str::FromStr;
 use std::{fmt, io, mem, thread};
-use std::fmt::{Display, Formatter};
 use threadpool::ThreadPool;
 use yeet_ops::yeet;
 
@@ -56,6 +56,9 @@ struct Args {
     /// Parallel jobs number. 0 for unlimited.
     #[arg(short, long, default_value = *NUM_CPUS_STR)]
     jobs: usize,
+    /// Output f64le wav instead of s16le PCM format.
+    #[arg(long = "float")]
+    output_float: bool,
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,44 +108,6 @@ impl FromStr for SsbType {
     }
 }
 
-pub fn complex_hilbert(input: &[Complex64]) -> Vec<Complex<f64>> {
-    let len = input.len();
-    let mut planner = FftPlanner::<f64>::new();
-    let fft = planner.plan_fft_forward(len);
-
-    let mut fft_complex = input.iter().copied().collect::<Vec<_>>();
-    fft.process(&mut fft_complex);
-
-    let mut h_spectrum = vec![Complex::new(0.0, 0.0); len];
-
-    if len % 2 == 0 {
-        h_spectrum[0] = Complex::new(1.0, 0.0);
-        h_spectrum[len / 2] = Complex::new(1.0, 0.0);
-        for i in 1..(len / 2) {
-            h_spectrum[i] = Complex::new(2.0, 0.0);
-        }
-    } else {
-        h_spectrum[0] = Complex::new(1.0, 0.0);
-        for i in 1..((len + 1) / 2) {
-            h_spectrum[i] = Complex::new(2.0, 0.0);
-        }
-    }
-
-    for i in 0..len {
-        fft_complex[i] = fft_complex[i] * h_spectrum[i];
-    }
-
-    let mut ifft_complex = fft_complex.clone();
-    let ifft = planner.plan_fft_inverse(len);
-    ifft.process(&mut ifft_complex);
-
-    for val in ifft_complex.iter_mut() {
-        *val = *val / len as f64
-    }
-
-    ifft_complex
-}
-
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
@@ -180,15 +145,28 @@ fn main() -> anyhow::Result<()> {
     for f in freq_list {
         let filename = output_filename(f.0, f.1);
         let path = args.out_dir.join(filename);
-        let mut wav_writer = WavWriter::new(
-            BufWriter::new(File::create(&path)?),
-            WavSpec {
-                channels: 1,
-                sample_rate: VOICE_SAMPLE_RATE as u32,
-                bits_per_sample: 16,
-                sample_format: SampleFormat::Int,
-            },
-        )?;
+        let output_writer = BufWriter::new(File::create(&path)?);
+        let mut wav_writer = if args.output_float {
+            WavWriter::new(
+                output_writer,
+                WavSpec {
+                    channels: 1,
+                    sample_rate: VOICE_SAMPLE_RATE as u32,
+                    bits_per_sample: 64,
+                    sample_format: SampleFormat::Float,
+                },
+            )?
+        } else {
+            WavWriter::new(
+                output_writer,
+                WavSpec {
+                    channels: 1,
+                    sample_rate: VOICE_SAMPLE_RATE as u32,
+                    bits_per_sample: 16,
+                    sample_format: SampleFormat::Int,
+                },
+            )?
+        };
 
         let worker = spawn_demodulation_worker(f_center, f.0, f.1)?;
         // feed thread
@@ -211,10 +189,15 @@ fn main() -> anyhow::Result<()> {
         let t = thread::Builder::new()
             .name(format!("Worker: {:?}", f))
             .spawn(move || {
-                for pcm_sample in worker.1 {
-                    wav_writer
-                        .write_sample((pcm_sample * args.amplification).to_sample::<i16>())
-                        .unwrap();
+                if args.output_float {
+                    // `hound` doesn't support f64 PCM output at this time
+                    todo!()
+                } else {
+                    for pcm_sample in worker.1 {
+                        wav_writer
+                            .write_sample((pcm_sample * args.amplification).to_sample::<i16>())
+                            .unwrap();
+                    }
                 }
                 println!("Output to {} finished", path.display());
             })?;
@@ -320,12 +303,17 @@ fn spawn_interval_hilbert_worker() -> anyhow::Result<(Sender<Complex64>, Receive
     let (result_tx, result_rx) = bounded(CHANNEL_SIZE);
 
     thread::spawn(move || {
+        let mut hilbert_buf = (
+            vec![Default::default(); GROUP_LENGTH as usize],
+            vec![Default::default(); GROUP_LENGTH as usize],
+        );
+
         let mut buffer = Vec::new();
         for iq in rx {
             buffer.push(iq);
             if buffer.len() as u64 == GROUP_LENGTH {
-                let transformed = complex_hilbert(&buffer);
-                for sample in transformed {
+                complex_hilbert_inplace(&mut buffer, &mut hilbert_buf.0, &mut hilbert_buf.1);
+                for &sample in &buffer {
                     result_tx.send(sample).unwrap();
                 }
                 buffer.clear();
@@ -333,8 +321,8 @@ fn spawn_interval_hilbert_worker() -> anyhow::Result<(Sender<Complex64>, Receive
         }
         // Handle any remaining samples
         if !buffer.is_empty() {
-            let transformed = complex_hilbert(&buffer);
-            for sample in transformed {
+            complex_hilbert_inplace(&mut buffer, &mut hilbert_buf.0, &mut hilbert_buf.1);
+            for &sample in &buffer {
                 result_tx.send(sample).unwrap();
             }
         }
@@ -352,8 +340,8 @@ struct FreqModeDisplay((i64, SsbType));
 impl Display for FreqModeDisplay {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         use fmt::Write;
-        let hz = self.0.0;
+        let hz = self.0 .0;
         let khz = Decimal::from(hz) / Decimal::ONE_THOUSAND;
-        write!(f, "{khz} {}", self.0.1.name())
+        write!(f, "{khz} {}", self.0 .1.name())
     }
 }

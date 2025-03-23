@@ -4,11 +4,16 @@ use crate::sample_formats::SampleFormat;
 use anyhow::anyhow;
 use hound::{WavSpec, WavWriter};
 use num_complex::{Complex, Complex64};
+use rust_decimal::Decimal;
+use rustfft::num_traits::{ToPrimitive, Zero};
+use rustfft::FftPlanner;
 use std::fs::File;
 use std::io;
 use std::io::{BufReader, BufWriter, Seek, Write};
+use std::ops::Deref;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::str::FromStr;
 use std::sync::mpsc::{sync_channel, Receiver};
 use std::thread::spawn;
 
@@ -175,18 +180,22 @@ pub fn create_sdrpp_wav_iq(
 }
 
 pub mod iq_raw {
-    use std::fs::File;
-    use std::{io, mem};
-    use std::io::{BufReader, Seek, SeekFrom};
-    use std::path::Path;
-    use std::thread::spawn;
+    use crate::SYNC_CHANNEL_SIZE;
     use byteorder::{ReadBytesExt, LE};
     use chrono::NaiveTime;
     use crossbeam_channel::{bounded, Receiver};
     use num_complex::Complex64;
-    use crate::SYNC_CHANNEL_SIZE;
+    use std::fs::File;
+    use std::io::{BufReader, Seek, SeekFrom};
+    use std::path::Path;
+    use std::thread::spawn;
+    use std::{io, mem};
 
-    pub fn parse_sample_range(start: Option<&str>, end: Option<&str>, sample_rate: u64) -> anyhow::Result<SampleRange> {
+    pub fn parse_sample_range(
+        start: Option<&str>,
+        end: Option<&str>,
+        sample_rate: u64,
+    ) -> anyhow::Result<SampleRange> {
         let zero_time = NaiveTime::from_hms_opt(0, 0, 0).unwrap();
         let start = NaiveTime::parse_from_str(&start.unwrap_or("0:0:0"), "%H:%M:%S")?;
         let skip_samples = (start - zero_time).num_seconds() as u64 * sample_rate;
@@ -201,7 +210,7 @@ pub mod iq_raw {
             length: duration_samples,
         })
     }
-    
+
     #[derive(Debug, Copy, Clone)]
     pub struct SampleRange {
         pub start: u64,
@@ -216,12 +225,10 @@ pub mod iq_raw {
     ) -> anyhow::Result<Receiver<(u64, Complex64)>> {
         let (tx, rx) = bounded(SYNC_CHANNEL_SIZE);
         spawn(move || {
-            // Wav produced by SDR++ sometimes has a wrong header indicating a truncated length.
-            // Read the wav on our own.
             let mut reader = BufReader::with_capacity(1048576, File::open(iq_raw_file).unwrap());
             reader
                 .seek(SeekFrom::Start(
-                    samples_skip * size_of::<f32>() as u64 * 2 /* stereo channel */,
+                    samples_skip * size_of::<f32>() as u64 * 2, /* stereo channel */
                 ))
                 .unwrap();
             let mut iq_sample_n = 0_u64;
@@ -247,5 +254,84 @@ pub mod iq_raw {
             }
         });
         Ok(rx)
+    }
+}
+
+pub struct Hertz(pub i64);
+
+impl Deref for Hertz {
+    type Target = i64;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Hertz {
+    pub fn from_khz_str(khz: &str) -> anyhow::Result<Self> {
+        let hz = Decimal::from_str(khz)? * Decimal::ONE_THOUSAND;
+        Ok(Self(hz.to_i64().ok_or(anyhow!("Out of range"))?))
+    }
+}
+
+pub fn complex_hilbert(input: &[Complex64]) -> Vec<Complex64> {
+    let mut fft_buffer = vec![Default::default(); input.len()];
+    let mut fft_spec_buffer = vec![Default::default(); input.len()];
+    let mut data = Vec::from(input);
+    complex_hilbert_inplace(&mut data, &mut fft_buffer, &mut fft_spec_buffer);
+    data
+}
+
+pub fn complex_hilbert_inplace(
+    input: &mut [Complex64],
+    fft_buffer: &mut [Complex64],
+    fft_spec_buffer: &mut [Complex64],
+) {
+    debug_assert!(fft_buffer.len() >= input.len());
+    debug_assert!(fft_spec_buffer.len() >= input.len());
+    let len = input.len();
+    let mut planner = FftPlanner::<f64>::new();
+    let fft = planner.plan_fft_forward(len);
+
+    fft.process_with_scratch(input, fft_buffer);
+
+    let h_spectrum = fft_spec_buffer;
+    h_spectrum.fill(Complex64::zero());
+    if len % 2 == 0 {
+        h_spectrum[0] = Complex::new(1.0, 0.0);
+        h_spectrum[len / 2] = Complex::new(1.0, 0.0);
+        for i in 1..(len / 2) {
+            h_spectrum[i] = Complex::new(2.0, 0.0);
+        }
+    } else {
+        h_spectrum[0] = Complex::new(1.0, 0.0);
+        for i in 1..((len + 1) / 2) {
+            h_spectrum[i] = Complex::new(2.0, 0.0);
+        }
+    }
+
+    input.iter_mut().zip(h_spectrum).for_each(|(i, h)| *i *= *h);
+
+    let ifft = planner.plan_fft_inverse(len);
+    ifft.process(input);
+
+    input.iter_mut().for_each(|x| *x /= len as f64);
+}
+
+#[cfg(test)]
+pub mod test {
+    use crate::complex_hilbert;
+    use num_complex::Complex64;
+
+    #[test]
+    fn hilbert() {
+        let data = [
+            Complex64::new(1.0, 0.0),
+            Complex64::new(2.0, 0.0),
+            Complex64::new(3.0, 0.0),
+            Complex64::new(4.0, 0.0),
+        ];
+        let hilbert = complex_hilbert(&data);
+        println!("{:?}", hilbert);
     }
 }
