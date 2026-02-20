@@ -1,5 +1,3 @@
-#![feature(let_chains)]
-
 use crate::sample_formats::SampleFormat;
 use anyhow::anyhow;
 use hound::{WavSpec, WavWriter};
