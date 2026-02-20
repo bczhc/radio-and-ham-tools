@@ -2,8 +2,6 @@
 #![feature(yeet_expr)]
 #![feature(let_chains)]
 
-mod sdrpp_iq_demod_ssb;
-
 use anyhow::anyhow;
 use calamine::{open_workbook, Data, DataType, Ods, Range, Reader};
 use clap::Parser;

@@ -27,27 +27,3 @@ crossbeam-channel = "0.5.14"
 threadpool = "1.8.1"
 num_cpus = "1.16.0"
 once_cell = "1.20.3"
-
-[[bin]]
-path = "src/demo.rs"
-name = "demo"
-
-[[bin]]
-path = "src/qso_sheet_to_adi.rs"
-name = "qso-sheet-to-adi"
-
-[[bin]]
-path = "src/sdrpp_iq_demod_ssb.rs"
-name = "sdrpp-iq-demod-ssb"
-
-[[bin]]
-path = "src/ssb.rs"
-name = "ssb"
-
-[[bin]]
-path = "src/two_audio_to_iq_mod.rs"
-name = "two-audio-to-iq-mod"
-
-[[bin]]
-path = "src/iq_raw_to_wav.rs"
-name = "iq-raw-to-wav"
