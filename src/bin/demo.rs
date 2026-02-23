@@ -9,27 +9,54 @@ use num_complex::{Complex, Complex64};
 use radio_and_ham_tools::{
     create_sdrpp_wav_iq, ffmpeg_read_audio_pcm_filter, sample_formats, IqWriter,
 };
-use std::f64::consts::PI;
+use std::f64::consts::{E, PI};
 use std::fs::File;
 use std::io::Read;
 use rand::RngExt;
 
 fn main() -> anyhow::Result<()> {
-    let sample_rate = 500000;
-    let path = "/home/bczhc/Music/奢香夫人.wav";
-    let filter = "firequalizer=gain='if(between(f,300,5000),0,-inf)':zero_phase=on";
+    let mut rng = rand::rng();
+
+    // Chirp
+    let sample_rate = 100000;
+    let mut wav_writer = hound::WavWriter::new(File::create_buffered("/home/bczhc/chirp.wav")?, WavSpec {
+        channels: 1,
+        sample_rate,
+        sample_format: SampleFormat::Int,
+        bits_per_sample: 16,
+    })?;
+    // 0Hz..3000Hz
+    let seconds = 60;
+    let mut phase = 0.0;
+    for i in 0..(sample_rate * seconds) {
+        let t = i as f64 / sample_rate as f64;
+        // let f_inst = t / seconds as f64 * 3000.0;
+        let f_inst = f64::powf(E, t / 8.0) - 1.0;
+        phase += 2.0 * PI / sample_rate as f64 * f_inst;
+        let iq = Complex64::from_polar(1.0, phase);
+        wav_writer.write_sample((iq.re).to_sample::<i16>())?;
+    }
+    drop(wav_writer);
+
+
+    let sample_rate = 1000000;
+    // let path = "/home/bczhc/Music/奢香夫人.wav";
+    let path = "/home/bczhc/chirp.wav";
+    // let filter = "firequalizer=gain='if(between(f,300,5000),0,-inf)':zero_phase=on";
+    let filter = "anull";
     let samples =
+
         ffmpeg_read_audio_pcm_filter::<sample_formats::F64LE>(path, sample_rate, 1, filter)?;
 
     let samples = samples
         .iter()
         // .skip(sample_rate as usize * 60)
-        .take(sample_rate as usize * 5)
+        .take(sample_rate as usize * 60)
         .collect::<Vec<_>>();
 
-    let mut iq_writer = create_sdrpp_wav_iq("/home/bczhc/iq.wav", sample_rate)?;
-    // // FM
-    // let k_f = 100_000.0;
+    let mut iq_writer = create_sdrpp_wav_iq("/tmp/iq.wav", sample_rate)?;
+    // FM
+    // let k_f = 80_000.0;
     // let mut phase = 0.0;
     // for (i, &s) in samples.iter().enumerate() {
     //     let f_inst = k_f * s;
@@ -38,6 +65,17 @@ fn main() -> anyhow::Result<()> {
     //     let iq = Complex64::from_polar(0.8, phase);
     //     iq_writer.write_iq_s16(iq)?;
     // }
+
+    // AM in phase-sum approach
+    let f_c = 0.0;
+    let mut phase = 0.0;
+    for s in samples {
+        let amp = (s + 1.0) / 2.0 * 0.8;
+        let phase_step = 2.0 * PI / sample_rate as f64 * f_c;
+        phase += phase_step;
+        let iq = Complex64::from_polar(amp, phase);
+        iq_writer.write_iq_s16(iq)?;
+    }
 
     // PM
     // let k_p = 1.5;
@@ -165,24 +203,24 @@ fn main() -> anyhow::Result<()> {
     //     let iq = Complex64::from_polar(0.8, phase);
     //     iq_writer.write_iq_s16(iq)?;
     // }
-
-    let image = image::open("/home/bczhc/1.png")?;
-    let image = image.to_luma8();
-    let width = 300;
-    let height = 300;
-    println!("{}", image.get_pixel(0, 0).0[0]);
-
-    let sample_rate = 6000u32;
-    let fft_len = 600;
-    let mut wav_writer = hound::WavWriter::new(
-        File::create_buffered("/home/bczhc/out.wav")?,
-        WavSpec {
-            sample_rate,
-            sample_format: SampleFormat::Int,
-            channels: 1,
-            bits_per_sample: 2 * 8,
-        },
-    )?;
+    //
+    // let image = image::open("/home/bczhc/1.png")?;
+    // let image = image.to_luma8();
+    // let width = 300;
+    // let height = 300;
+    // println!("{}", image.get_pixel(0, 0).0[0]);
+    //
+    // let sample_rate = 6000u32;
+    // let fft_len = 600;
+    // let mut wav_writer = hound::WavWriter::new(
+    //     File::create_buffered("/home/bczhc/out.wav")?,
+    //     WavSpec {
+    //         sample_rate,
+    //         sample_format: SampleFormat::Int,
+    //         channels: 1,
+    //         bits_per_sample: 2 * 8,
+    //     },
+    // )?;
 
     // Spectrum painting - my awful attempt
     // let c2r = realfft::RealFftPlanner::<f64>::new().plan_fft_inverse(fft_len);
@@ -206,7 +244,6 @@ fn main() -> anyhow::Result<()> {
     //         wav_writer.write_sample(x.to_sample::<i16>())?;
     //     }
     // }
-
 
     Ok(())
 }
