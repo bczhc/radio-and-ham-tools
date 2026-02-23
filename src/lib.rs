@@ -12,8 +12,9 @@ use std::ops::Deref;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::str::FromStr;
-use std::sync::mpsc::{sync_channel, Receiver};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::thread::spawn;
+use byteorder::{WriteBytesExt, LE};
 
 pub const SYNC_CHANNEL_SIZE: usize = 10485760;
 
@@ -82,12 +83,26 @@ where
     F: SampleFormat + Send,
     F::SampleType: Send + 'static,
 {
+    ffmpeg_read_audio_pcm_filter::<F>(source, sample_rate, channel, "anull")
+}
+
+pub fn ffmpeg_read_audio_pcm_filter<F>(
+    source: impl AsRef<Path>,
+    sample_rate: u32,
+    channel: u32,
+    filter: &str,
+) -> anyhow::Result<Receiver<F::SampleType>>
+where
+    F: SampleFormat + Send,
+    F::SampleType: Send + 'static,
+{
     let (tx, rx) = sync_channel(SYNC_CHANNEL_SIZE);
     let codec = F::FFMPEG_CODEC;
     let format = F::FFMPEG_FORMAT;
     let cmd = format!(
-        "ffmpeg -v error -i {} -map 0:a -c:a {codec} -ac {channel} -ar {sample_rate} -f {format} -",
-        shell_words::quote(source.as_ref().to_str().ok_or(anyhow!("Non UTF-8"))?)
+        "ffmpeg -v error -i {} -map 0:a -c:a {codec} -af {} -ac {channel} -ar {sample_rate} -f {format} -",
+        shell_words::quote(source.as_ref().to_str().ok_or(anyhow!("Non UTF-8"))?),
+        shell_words::quote(filter)
     );
     let split = shell_words::split(&cmd).unwrap();
     let child = Command::new(&split[0])
@@ -108,7 +123,9 @@ where
                 break;
             }
             let sample = result.unwrap();
-            tx.send(sample).unwrap();
+            // Even the channel is closed, keep consuming all FFmpeg outputs, or it will
+            // yield "Broken pipe".
+            let _c = tx.send(sample);
         }
     });
     Ok(rx)
@@ -314,6 +331,42 @@ pub fn complex_hilbert_inplace(
     ifft.process(input);
 
     input.iter_mut().for_each(|x| *x /= len as f64);
+}
+
+pub enum AplayFormat {
+    S16,
+    F32,
+}
+
+pub fn pcm_f32_aplay_sink(channels: u32, sample_rate: u32) -> anyhow::Result<SyncSender<f32>> {
+    let aplay_format = match AplayFormat::F32 {
+        AplayFormat::S16 => "S16_LE",
+        AplayFormat::F32 => "FLOAT_LE",
+    };
+
+    let cmd = format!("aplay -f {aplay_format} -c {channels} -r {sample_rate}");
+    let split = shell_words::split(&cmd).unwrap();
+    let child = Command::new(&split[0])
+        .args(&split[1..])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()?;
+
+    let (tx, rx) = sync_channel::<f32>(1024);
+
+    spawn(move || {
+        let child = child;
+        let rx = rx;
+        let mut stdin = child.stdin.unwrap();
+        for s in rx {
+            stdin.write_f32::<LE>(s).unwrap();
+        }
+
+        // Channel gets closed. Finish the stdin.
+        drop(stdin);
+    });
+    Ok(tx)
 }
 
 #[cfg(test)]

@@ -37,6 +37,7 @@ fn main() -> anyhow::Result<()> {
     let samples1_hilbert = hilbert(samples1);
     let samples2_hilbert = hilbert(samples2);
     for idx in 0..count {
+        // H(m1)+swap_iq(H(m2))
         let i = samples1[idx] + samples2_hilbert[idx].im;
         let q = samples1_hilbert[idx].im + samples2[idx];
         writer.write_iq_s16(Complex64::new(i, q))?
